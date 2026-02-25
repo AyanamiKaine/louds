@@ -1,0 +1,17 @@
+{
+  "name": "louds",
+  "output_type": "library",
+  "cxx_standard": 23,
+  "sources": {
+    "modules": [
+      "src/louds.cppm"
+    ],
+    "private": [
+      "src/louds_impl.cpp"
+    ]
+  },
+  "dependencies": [],
+  "tests": {
+    "files": []
+  }
+}

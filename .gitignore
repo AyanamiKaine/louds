@@ -1,0 +1,39 @@
+# Build outputs
+/build/
+/build-*/
+/out/
+/bin/
+/obj/
+
+# Abel
+/.abel/
+
+# CMake generated files
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/compile_commands.json
+/CTestTestfile.cmake
+/Testing/
+/Makefile
+/install_manifest.txt
+
+# IDE files
+/.vs/
+/.vscode/
+/.idea/
+*.suo
+*.user
+*.sln.docstates
+
+# Compiler artifacts
+*.o
+*.obj
+*.pdb
+*.ilk
+*.d
+*.exe
+
+# OS files
+.DS_Store
+Thumbs.db
