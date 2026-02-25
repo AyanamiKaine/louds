@@ -101,7 +101,10 @@ namespace louds {
         }
 
         bool is_valid(ThingRef ref) const {
-            return ref.index > 0 && ref.index < MAX_THINGS && nodes[ref.index].generation == ref.generation;
+            return ref.index > 0 &&
+                   ref.index < MAX_THINGS &&
+                   nodes[ref.index].is_active &&
+                   nodes[ref.index].generation == ref.generation;
         }
 
         T& get(ThingRef ref) { return get_node(ref).data; }

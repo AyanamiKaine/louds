@@ -1,7 +1,7 @@
 {
   "name": "louds",
-  "output_type": "library",
   "cxx_standard": 23,
+  "output_type": "library",
   "sources": {
     "modules": [
       "src/louds.cppm"
@@ -12,6 +12,8 @@
   },
   "dependencies": [],
   "tests": {
-    "files": []
+    "files": [
+      "tests/example.cpp"
+    ]
   }
 }
