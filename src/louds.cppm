@@ -3,6 +3,8 @@ module;
 // --- Global Module Fragment ---
 #include <cstdint>
 #include <cassert>
+#include <algorithm>
+#include <concepts>
 #include <type_traits>
 
 export module louds;
@@ -38,6 +40,8 @@ namespace louds {
 
     export template <typename T, size_t MAX_THINGS>
     class ThingPool {
+        static_assert(MAX_THINGS >= 2, "ThingPool requires MAX_THINGS >= 2.");
+
     private:
         struct Node {
             Generation generation = 0;
@@ -70,6 +74,33 @@ namespace louds {
             return nodes[ref.index];
         }
 
+        void destroy_idx_recursive(ThingIdx idx) {
+            Node& node = nodes[idx];
+            if (!node.is_active) return;
+
+            const ThingIdx first_child = node.first_child;
+            if (first_child != 0) {
+                ThingIdx child = first_child;
+                do {
+                    const ThingIdx next_child = nodes[child].next_sibling;
+                    destroy_idx_recursive(child);
+                    child = next_child;
+                } while (child != 0 && child != first_child);
+            }
+
+            const ThingRef ref{idx, node.generation};
+            if (node.parent != 0) {
+                detach(ref);
+            }
+
+            const Generation current_gen = node.generation;
+            node = {};
+            node.generation = current_gen;
+            node.is_active = false;
+            next_free[idx] = first_free;
+            first_free = idx;
+        }
+
     public:
         ThingPool() {
             for (ThingIdx i = 1; i < MAX_THINGS - 1; ++i) {
@@ -91,13 +122,7 @@ namespace louds {
 
         void destroy(ThingRef ref) {
             if (!is_valid(ref)) return;
-            detach(ref); 
-            Generation current_gen = nodes[ref.index].generation;
-            nodes[ref.index] = {}; 
-            nodes[ref.index].generation = current_gen;
-            nodes[ref.index].is_active = false;
-            next_free[ref.index] = first_free;
-            first_free = ref.index;
+            destroy_idx_recursive(ref.index);
         }
 
         bool is_valid(ThingRef ref) const {
@@ -107,7 +132,10 @@ namespace louds {
                    nodes[ref.index].generation == ref.generation;
         }
 
-        T& get(ThingRef ref) { return get_node(ref).data; }
+        T& get(ThingRef ref) {
+            assert(is_valid(ref) && "ThingPool::get called with invalid ThingRef.");
+            return get_node(ref).data;
+        }
 
         void attach_child(ThingRef parent_ref, ThingRef child_ref) {
             Node& parent = get_node(parent_ref);
@@ -173,6 +201,40 @@ namespace louds {
         Iterator begin() { return Iterator(this, 1); }
         Iterator end()   { return Iterator(this, MAX_THINGS); }
 
+        template <typename Kind, typename Fn>
+        void for_kind(const Kind& kind, Fn&& fn) {
+            static_assert(
+                requires(T& value, const Kind& query_kind) {
+                    { value.kind == query_kind } -> std::convertible_to<bool>;
+                },
+                "ThingPool::for_kind requires payload T to have a comparable .kind field."
+            );
+
+            for (ThingIdx idx = 1; idx < MAX_THINGS; ++idx) {
+                Node& node = nodes[idx];
+                if (!node.is_active) continue;
+                if (!(node.data.kind == kind)) continue;
+                fn(ThingRef{idx, node.generation}, node.data);
+            }
+        }
+
+        template <typename Kind, typename Fn>
+        void for_kind(const Kind& kind, Fn&& fn) const {
+            static_assert(
+                requires(const T& value, const Kind& query_kind) {
+                    { value.kind == query_kind } -> std::convertible_to<bool>;
+                },
+                "ThingPool::for_kind requires payload T to have a comparable .kind field."
+            );
+
+            for (ThingIdx idx = 1; idx < MAX_THINGS; ++idx) {
+                const Node& node = nodes[idx];
+                if (!node.is_active) continue;
+                if (!(node.data.kind == kind)) continue;
+                fn(ThingRef{idx, node.generation}, node.data);
+            }
+        }
+
         bool save_to_file(const char* filepath) const {
             static_assert(std::is_trivially_copyable_v<T>, "FATAL: Payload T must be trivially copyable!");
             SaveHeader header;
@@ -185,15 +247,21 @@ namespace louds {
 
         bool load_from_file(const char* filepath) {
             static_assert(std::is_trivially_copyable_v<T>, "FATAL: Payload T must be trivially copyable!");
-            SaveHeader header;
+            SaveHeader header{};
+            ThingIdx loaded_next_free[MAX_THINGS] = {};
+            Node loaded_nodes[MAX_THINGS] = {};
             
             bool success = detail::read_pool_from_disk(filepath, &header, sizeof(SaveHeader), 
-                                                       next_free, sizeof(next_free), 
-                                                       nodes, sizeof(nodes));
+                                                       loaded_next_free, sizeof(loaded_next_free), 
+                                                       loaded_nodes, sizeof(loaded_nodes));
             if (success) {
                 if (header.magic[0] != 'L' || header.magic[1] != 'O' || 
                     header.magic[2] != 'G' || header.magic[3] != 'C') return false;
                 if (header.max_things != MAX_THINGS || header.node_size != sizeof(Node)) return false;
+                if (header.first_free >= MAX_THINGS) return false;
+
+                std::copy_n(loaded_next_free, MAX_THINGS, next_free);
+                std::copy_n(loaded_nodes, MAX_THINGS, nodes);
                 first_free = header.first_free;
                 return true;
             }
