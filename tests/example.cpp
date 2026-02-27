@@ -50,9 +50,6 @@ void simulate_motion_step(louds::ThingPool<GameThing, 32>& pool, float dt) {
 
 template <size_t MAX_THINGS>
 void apply_projectile_hits(louds::ThingPool<GameThing, MAX_THINGS>& world, std::int32_t damage) {
-    std::array<louds::ThingRef, MAX_THINGS> projectiles_to_destroy{};
-    size_t destroy_count = 0;
-
     for (auto item : world) {
         auto& thing = item.data;
         if (thing.kind != ThingKind::projectile) {
@@ -64,28 +61,15 @@ void apply_projectile_hits(louds::ThingPool<GameThing, MAX_THINGS>& world, std::
             target.health -= damage;
         }
 
-        projectiles_to_destroy[destroy_count++] = item.ref;
-    }
-
-    for (size_t i = 0; i < destroy_count; ++i) {
-        world.destroy(projectiles_to_destroy[i]);
+        (void)world.destroy_later(item.ref);
     }
 }
 
 template <size_t MAX_THINGS>
 void cleanup_dead_enemies(louds::ThingPool<GameThing, MAX_THINGS>& world) {
-    std::array<louds::ThingRef, MAX_THINGS> enemies_to_destroy{};
-    size_t destroy_count = 0;
-
-    for (auto item : world) {
-        if (item.data.kind == ThingKind::enemy && item.data.health <= 0) {
-            enemies_to_destroy[destroy_count++] = item.ref;
-        }
-    }
-
-    for (size_t i = 0; i < destroy_count; ++i) {
-        world.destroy(enemies_to_destroy[i]);
-    }
+    (void)world.queue_destroy_if([](louds::ThingRef, const GameThing& thing) {
+        return thing.kind == ThingKind::enemy && thing.health <= 0;
+    });
 }
 
 } // namespace
@@ -313,6 +297,127 @@ TEST_CASE("load failure is transactional and leaves existing pool state untouche
     std::filesystem::remove(path);
 }
 
+TEST_CASE("destroy_later and flush destroy queued entities") {
+    louds::ThingPool<int, 8> pool;
+    const auto a = pool.spawn();
+    const auto b = pool.spawn();
+    const auto c = pool.spawn();
+    REQUIRE(pool.is_valid(a));
+    REQUIRE(pool.is_valid(b));
+    REQUIRE(pool.is_valid(c));
+
+    CHECK(pool.destroy_later(a));
+    CHECK(pool.destroy_later(c));
+    CHECK(pool.pending_destroy_count() == 2);
+
+    const auto destroyed = pool.flush_destroy_later();
+    CHECK(destroyed == 2);
+    CHECK(pool.pending_destroy_count() == 0);
+    CHECK_FALSE(pool.is_valid(a));
+    CHECK(pool.is_valid(b));
+    CHECK_FALSE(pool.is_valid(c));
+}
+
+TEST_CASE("destroy_later duplicates are harmless") {
+    louds::ThingPool<int, 8> pool;
+    const auto a = pool.spawn();
+    REQUIRE(pool.is_valid(a));
+
+    CHECK(pool.destroy_later(a));
+    CHECK(pool.destroy_later(a));
+    CHECK(pool.pending_destroy_count() == 2);
+
+    const auto destroyed = pool.flush_destroy_later();
+    CHECK(destroyed == 1);
+    CHECK(pool.pending_destroy_count() == 0);
+    CHECK_FALSE(pool.is_valid(a));
+}
+
+TEST_CASE("stale queued refs do not destroy replacement after slot reuse") {
+    louds::ThingPool<int, 8> pool;
+    const auto old_ref = pool.spawn();
+    REQUIRE(pool.is_valid(old_ref));
+
+    CHECK(pool.destroy_later(old_ref));
+    pool.destroy(old_ref);
+    const auto replacement = pool.spawn();
+    REQUIRE(pool.is_valid(replacement));
+
+    const auto destroyed = pool.flush_destroy_later();
+    CHECK(destroyed == 0);
+    CHECK(pool.is_valid(replacement));
+}
+
+TEST_CASE("queued parent destroy preserves recursive subtree semantics") {
+    louds::ThingPool<int, 16> pool;
+    const auto root = pool.spawn();
+    const auto child = pool.spawn();
+    const auto grandchild = pool.spawn();
+    REQUIRE(pool.is_valid(root));
+    REQUIRE(pool.is_valid(child));
+    REQUIRE(pool.is_valid(grandchild));
+
+    pool.attach_child(root, child);
+    pool.attach_child(child, grandchild);
+
+    CHECK(pool.destroy_later(root));
+    const auto destroyed = pool.flush_destroy_later();
+
+    CHECK(destroyed == 1);
+    CHECK_FALSE(pool.is_valid(root));
+    CHECK_FALSE(pool.is_valid(child));
+    CHECK_FALSE(pool.is_valid(grandchild));
+}
+
+TEST_CASE("destroy_later overflow returns false and keeps state valid") {
+    louds::ThingPool<int, 4> pool;
+    const auto a = pool.spawn();
+    const auto b = pool.spawn();
+    const auto c = pool.spawn();
+    REQUIRE(pool.is_valid(a));
+    REQUIRE(pool.is_valid(b));
+    REQUIRE(pool.is_valid(c));
+
+    CHECK(pool.destroy_later(a));
+    CHECK(pool.destroy_later(b));
+    CHECK(pool.destroy_later(c));
+    CHECK(pool.pending_destroy_count() == 3);
+
+    CHECK_FALSE(pool.destroy_later(louds::ThingRef{1u, 1u}));
+    CHECK(pool.pending_destroy_count() == 3);
+
+    const auto destroyed = pool.flush_destroy_later();
+    CHECK(destroyed == 3);
+    CHECK(pool.pending_destroy_count() == 0);
+}
+
+TEST_CASE("pending destroy queue is cleared by load_from_file") {
+    louds::ThingPool<std::int32_t, 8> source;
+    const auto src_ref = source.spawn();
+    REQUIRE(source.is_valid(src_ref));
+    source.get(src_ref) = 777;
+
+    const auto path =
+        (std::filesystem::temp_directory_path() / "louds_pending_queue_clear_on_load.bin").string();
+    REQUIRE(source.save_to_file(path.c_str()));
+
+    louds::ThingPool<std::int32_t, 8> target;
+    const auto queued_ref = target.spawn();
+    REQUIRE(target.is_valid(queued_ref));
+    target.get(queued_ref) = 111;
+    CHECK(target.destroy_later(queued_ref));
+    CHECK(target.pending_destroy_count() == 1);
+
+    REQUIRE(target.load_from_file(path.c_str()));
+    CHECK(target.pending_destroy_count() == 0);
+    CHECK(target.flush_destroy_later() == 0);
+
+    CHECK(target.is_valid(src_ref));
+    CHECK(target.get(src_ref) == 777);
+
+    std::filesystem::remove(path);
+}
+
 TEST_CASE("save and load round-trip preserves data and active set") {
     louds::ThingPool<std::int32_t, 8> original;
     const auto a = original.spawn();
@@ -498,12 +603,14 @@ TEST_CASE("combat frame example applies projectile damage and cleans dead enemie
 
     apply_projectile_hits(world, 25);
     cleanup_dead_enemies(world);
+    const auto destroyed = world.flush_destroy_later();
 
     CHECK_FALSE(world.is_valid(projectile_a));
     CHECK_FALSE(world.is_valid(projectile_b));
     CHECK_FALSE(world.is_valid(enemy_a));
     REQUIRE(world.is_valid(enemy_b));
     CHECK(world.get(enemy_b).health == 35);
+    CHECK(destroyed == 3);
 }
 
 TEST_CASE("stale target refs stay invalid when a slot is reused by a new enemy") {

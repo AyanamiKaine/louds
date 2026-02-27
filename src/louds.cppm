@@ -2,6 +2,7 @@ module;
 
 // --- Global Module Fragment ---
 #include <cstdint>
+#include <cstddef>
 #include <cassert>
 #include <algorithm>
 #include <concepts>
@@ -66,6 +67,8 @@ namespace louds {
         Node nodes[MAX_THINGS] = {};
         ThingIdx next_free[MAX_THINGS] = {};
         ThingIdx first_free = 1;
+        ThingRef pending_destroy[MAX_THINGS - 1] = {};
+        ThingIdx pending_destroy_count_ = 0;
 
         Node& get_node(ThingRef ref) {
             if (ref.index == 0 || ref.index >= MAX_THINGS || nodes[ref.index].generation != ref.generation) {
@@ -123,6 +126,35 @@ namespace louds {
         void destroy(ThingRef ref) {
             if (!is_valid(ref)) return;
             destroy_idx_recursive(ref.index);
+        }
+
+        bool destroy_later(ThingRef ref) {
+            if (ref.index == 0) return false;
+            if (pending_destroy_count_ >= (MAX_THINGS - 1)) return false;
+            pending_destroy[pending_destroy_count_++] = ref;
+            return true;
+        }
+
+        size_t flush_destroy_later() {
+            size_t destroyed = 0;
+            const ThingIdx pending_count = pending_destroy_count_;
+            for (ThingIdx i = 0; i < pending_count; ++i) {
+                const ThingRef ref = pending_destroy[i];
+                if (is_valid(ref)) {
+                    destroyed++;
+                }
+                destroy(ref);
+            }
+            clear_destroy_later();
+            return destroyed;
+        }
+
+        void clear_destroy_later() {
+            pending_destroy_count_ = 0;
+        }
+
+        size_t pending_destroy_count() const {
+            return pending_destroy_count_;
         }
 
         bool is_valid(ThingRef ref) const {
@@ -235,6 +267,22 @@ namespace louds {
             }
         }
 
+        template <typename Pred>
+        size_t queue_destroy_if(Pred&& pred) {
+            size_t queued = 0;
+            for (ThingIdx idx = 1; idx < MAX_THINGS; ++idx) {
+                Node& node = nodes[idx];
+                if (!node.is_active) continue;
+
+                ThingRef ref{idx, node.generation};
+                if (!pred(ref, node.data)) continue;
+                if (destroy_later(ref)) {
+                    queued++;
+                }
+            }
+            return queued;
+        }
+
         bool save_to_file(const char* filepath) const {
             static_assert(std::is_trivially_copyable_v<T>, "FATAL: Payload T must be trivially copyable!");
             SaveHeader header;
@@ -247,6 +295,7 @@ namespace louds {
 
         bool load_from_file(const char* filepath) {
             static_assert(std::is_trivially_copyable_v<T>, "FATAL: Payload T must be trivially copyable!");
+            clear_destroy_later();
             SaveHeader header{};
             ThingIdx loaded_next_free[MAX_THINGS] = {};
             Node loaded_nodes[MAX_THINGS] = {};

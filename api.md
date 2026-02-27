@@ -93,6 +93,41 @@ Destroys an active entry.
 - Returns slot to free-list.
 - Keeps slot generation so future `spawn()` can bump it.
 
+Complexity: O(size of destroyed subtree).
+
+### `bool destroy_later(ThingRef ref)`
+
+Enqueues `ref` for deferred destruction.
+
+- Returns `false` when `ref.index == 0`.
+- Returns `false` on queue overflow.
+- Returns `true` when enqueued.
+- Stores full `ThingRef` (`index + generation`), so stale refs are safely ignored at flush time.
+- No dedupe is performed.
+
+Complexity: O(1).
+
+### `size_t flush_destroy_later()`
+
+Flushes deferred destroy queue by calling `destroy(ref)` for each queued ref.
+
+- Returns number of refs that were valid at flush time and actually destroyed.
+- Duplicates and stale refs are harmless.
+- Recommended call point: outside active iteration loops.
+
+Complexity:
+- O(number of queued refs + total subtree work performed by `destroy`).
+
+### `void clear_destroy_later()`
+
+Drops all queued deferred destroy refs without destroying anything.
+
+Complexity: O(1).
+
+### `size_t pending_destroy_count() const`
+
+Returns number of queued deferred destroy refs.
+
 Complexity: O(1).
 
 ### `bool is_valid(ThingRef ref) const`
@@ -156,6 +191,24 @@ Callback forms:
 Complexity:
 - O(`MAX_THINGS`) scan with O(1) check per slot.
 
+### `template <typename Pred> size_t queue_destroy_if(Pred&& pred)`
+
+Scans active entries and enqueues refs for deferred destruction when predicate returns `true`.
+
+Predicate form:
+- `pred(ThingRef, T&) -> bool`
+
+Behavior:
+- Does not destroy immediately.
+- Useful for writing mutation-safe "mark then flush" systems.
+- If queue overflows, additional matching refs are skipped.
+
+Returns:
+- Number of refs successfully enqueued.
+
+Complexity:
+- O(`MAX_THINGS`) scan + O(1) enqueue attempts.
+
 ### `bool save_to_file(const char* filepath) const`
 
 Writes complete pool snapshot to disk.
@@ -167,6 +220,9 @@ Serialized data includes:
 - File header (`magic`, version, pool shape metadata, free-list head).
 - Free-list array.
 - Full node array.
+
+Not serialized:
+- Deferred destroy queue (`destroy_later` state).
 
 ### `bool load_from_file(const char* filepath)`
 
@@ -182,6 +238,7 @@ Compatibility checks:
 
 Note:
 - Load is transactional. On failure, existing pool state is left unchanged.
+- Deferred destroy queue is runtime-only and is cleared on every `load_from_file()` call.
 
 ## Nested Public Types
 

@@ -30,6 +30,9 @@ Important pieces:
 - `ThingRef { index, generation }`: stable handle with stale-handle protection.
 - `NilRef`: invalid sentinel (`index == 0`).
 - `spawn()` / `destroy()`: allocate/free slots via an internal free list (`destroy()` recursively destroys descendants).
+- `destroy_later(ref)` / `flush_destroy_later()`: defer structural mutation while iterating.
+- `clear_destroy_later()` / `pending_destroy_count()`: manage deferred queue state.
+- `queue_destroy_if(pred)`: bulk enqueue destruction from a predicate pass.
 - `attach_child(parent, child)` / `detach(ref)`: intrusive hierarchy (index-based).
 - Iteration (`for (auto item : pool)`): yields active items only.
 - `for_kind(kind, fn)`: dispatch-friendly full-pool pass that skips non-matching kinds.
@@ -41,6 +44,8 @@ Important pieces:
 Debug safety:
 - `get(ref)` asserts in debug builds if `ref` is invalid.
 - `load_from_file()` is transactional: on failure, pool state is unchanged.
+- Deferred destroy queue is runtime-only and cleared by `load_from_file()`.
+- Deferred destroy queue capacity is `MAX_THINGS - 1`; `destroy_later()` returns `false` on overflow.
 
 ## Payload rules (`T`)
 
@@ -136,6 +141,7 @@ Frame update can then compose many full-pool systems:
 void run_frame(louds::ThingPool<GameThing, 8192>& world, float dt) {
     update_projectiles(world, dt);
     damage_enemies(world, 5);
+    world.flush_destroy_later(); // apply deferred destroys once per frame/system boundary
 }
 ```
 
@@ -158,6 +164,7 @@ for (auto item : world) {
 
     auto& target = world.get(thing.target);
     target.health -= 25;
+    world.destroy_later(item.ref); // safe while iterating
 }
 ```
 
